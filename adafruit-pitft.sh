@@ -17,6 +17,8 @@ fi
 UPDATE_DB=false
 UNINSTALL=false
 
+SCRIPT_FOLDER_PATH="$(dirname $(realpath $0))"
+
 ############################ CALIBRATIONS ############################
 # For TSLib
 POINTERCAL_28r0="4232 11 -879396 1 5786 -752768 65536"
@@ -195,12 +197,37 @@ reconfig() {
 
 function softwareinstall() {
     echo "Installing Pre-requisite Software...This may take a few minutes!"
-                apt-get install -y libts0 1> /dev/null 2>&1 || apt-get install -y tslib 1> /dev/null 2>&1 || { warning "Apt failed to install TSLIB!" && exit 1; }
+    apt-get install -y libts0 1> /dev/null 2>&1 || apt-get install -y tslib 1> /dev/null 2>&1 || { warning "Apt failed to install TSLIB!" && exit 1; }
     apt-get install -y bc fbi git python-dev python-pip python-smbus python-spidev evtest libts-bin device-tree-compiler 1> /dev/null  || { warning "Apt failed to install software!" && exit 1; }
     pip install evdev 1> /dev/null  || { warning "Pip failed to install software!" && exit 1; }
 }
 
-# Remove any old flexfb/fbtft stuff
+function st7789_overlay_install() {
+    
+    if [ "${pitfttype}" == "st7789_240x240" ]; then
+        dtc -@ -I dts -O dtb -o /boot/overlays/drm-minipitft13.dtbo $SCRIPT_FOLDER_PATH/overlays/minipitft13-overlay.dts
+    fi
+    if  [ "${pitfttype}" == "st7789_240x135" ]; then
+        dtc -@ -I dts -O dtb -o /boot/overlays/drm-minipitft114.dtbo $SCRIPT_FOLDER_PATH/overlays/minipitft114-overlay.dts
+    fi
+    if [ "${pitfttype}" == "st7789_240x320" ]; then
+        dtc -@ -I dts -O dtb -o /boot/overlays/drm-st7789v_240x320.dtbo $SCRIPT_FOLDER_PATH/overlays/st7789v_240x320-overlay.dts
+    fi
+    
+    echo "############# UPGRADING KERNEL ###############"
+#    sudo apt update  || { warning "Apt failed to update itself!" && exit 1; } # is already done in sysupdate() directly after rotation selection ?!
+    sudo apt-get upgrade || { warning "Apt failed to install software!" && exit 1; }
+    apt-get install -y raspberrypi-kernel-headers 1> /dev/null  || { warning "Apt failed to install software!" && exit 1; }
+    [ -d /lib/modules/$(uname -r)/build ] ||  { warning "Kernel was updated, please reboot now and re-run script!" && exit 1; }
+    echo "Compiling Device Tree Overlay for st7789 displays..."
+    cd $SCRIPT_FOLDER_PATH/st7789_module
+    make -C /lib/modules/$(uname -r)/build M=$(pwd) modules  || { warning "Apt failed to compile ST7789V driver!" && exit 1; }
+    mv /lib/modules/$(uname -r)/kernel/drivers/gpu/drm/tiny/mi0283qt.ko /lib/modules/$(uname -r)/kernel/drivers/gpu/drm/tiny/mi0283qt.BACK
+    mv st7789v_ada.ko /lib/modules/$(uname -r)/kernel/drivers/gpu/drm/tiny/mi0283qt.ko
+    
+}
+
+# Remove old pitft-helper section from boot/config.txt (if present)
 function uninstall_bootconfigtxt() {
     if grep -q "adafruit-pitft-helper" "/boot/config.txt"; then
         echo "Already have an adafruit-pitft-helper section in /boot/config.txt."
@@ -210,7 +237,7 @@ function uninstall_bootconfigtxt() {
     fi
 }
 
-# Remove any old flexfb/fbtft stuff
+# Remove any old flexfb/fbtft stuff ################################### OBSOLETE?!
 function uninstall_etc_modules() {
     rm -f /etc/modprobe.d/fbtft.conf
     sed -i 's/spi-bcm2835//g' "/etc/modules"
@@ -221,7 +248,7 @@ function uninstall_etc_modules() {
 # update /boot/config.txt with appropriate values
 function update_configtxt() {
     uninstall_bootconfigtxt
-    uninstall_etc_modules
+    uninstall_etc_modules 
 
     if [ "${pitfttype}" == "22" ]; then
         overlay="dtoverlay=pitft22,rotate=${pitftrot},speed=64000000,fps=30"
@@ -240,34 +267,19 @@ function update_configtxt() {
         overlay="dtoverlay=pitft35-resistive,rotate=${pitftrot},speed=20000000,fps=20"
     fi
 
-    if [ "${pitfttype}" == "st7789_240x320" ]; then
-        dtc -@ -I dts -O dtb -o /boot/overlays/drm-st7789v_240x320.dtbo overlays/st7789v_240x320-overlay.dts
-        overlay="dtoverlay=drm-st7789v_240x320,rotation=${pitftrot}"
-    fi
-    
     if [ "${pitfttype}" == "st7789_240x240" ]; then
-        dtc -@ -I dts -O dtb -o /boot/overlays/drm-minipitft13.dtbo overlays/minipitft13-overlay.dts
         overlay="dtoverlay=drm-minipitft13,rotation=${pitftrot}"
     fi
 
     if  [ "${pitfttype}" == "st7789_240x135" ]; then
-        dtc -@ -I dts -O dtb -o /boot/overlays/drm-minipitft114.dtbo overlays/minipitft114-overlay.dts
         overlay="dtoverlay=drm-minipitft114,rotation=${pitftrot}"
     fi
-
-    # any/all st7789's need their own kernel driver
-    if [ "${pitfttype}" == "st7789_240x240" ] || [ "${pitfttype}" == "st7789_240x320" ] || [ "${pitfttype}" == "st7789_240x135" ]; then
-        echo "############# UPGRADING KERNEL ###############"
-        sudo apt update  || { warning "Apt failed to update itself!" && exit 1; }
-        sudo apt-get upgrade || { warning "Apt failed to install software!" && exit 1; }
-        apt-get install -y raspberrypi-kernel-headers 1> /dev/null  || { warning "Apt failed to install software!" && exit 1; }
-        [ -d /lib/modules/$(uname -r)/build ] ||  { warning "Kernel was updated, please reboot now and re-run script!" && exit 1; }
-        cd st7789_module
-        make -C /lib/modules/$(uname -r)/build M=$(pwd) modules  || { warning "Apt failed to compile ST7789V driver!" && exit 1; }
-        mv /lib/modules/$(uname -r)/kernel/drivers/gpu/drm/tiny/mi0283qt.ko /lib/modules/$(uname -r)/kernel/drivers/gpu/drm/tiny/mi0283qt.BACK
-        mv st7789v_ada.ko /lib/modules/$(uname -r)/kernel/drivers/gpu/drm/tiny/mi0283qt.ko
+    
+    if [ "${pitfttype}" == "st7789_240x320" ]; then
+        #overlay="dtoverlay=drm-st7789v_240x320,rotation=${pitftrot}"
+        overlay="dtoverlay=drm-st7789v_240x320,rotation=${pitftrot}"
     fi
-
+    
     date=`date`
 
     cat >> /boot/config.txt <<EOF
@@ -349,7 +361,8 @@ function uninstall_console() {
 
 function install_fbcp() {
     echo "Installing cmake..."
-    apt-get --yes --force-yes install cmake 1> /dev/null  || { warning "Apt failed to install software!" && exit 1; }
+    # apt-get --yes --force-yes install cmake 1> /dev/null  || { warning "Apt failed to install software!" && exit 1; } ########### DEPRECATED
+    apt-get --yes --allow-downgrades --allow-remove-essential --allow-change-held-packages install cmake 1> /dev/null  || { warning "Apt failed to install software!" && exit 1; }
     echo "Downloading rpi-fbcp..."
     cd /tmp
     #curl -sLO https://github.com/tasanakorn/rpi-fbcp/archive/master.zip
@@ -417,37 +430,63 @@ function install_fbcp() {
         SCALE=1
     fi
     
-    if [[ "${pitfttype}" == "st7789_240x320" && ( "${pitftrot}" == "180" || "${pitftrot}" == "0" ) ]]; then
-        # swap width/height for portrait display rotation when using st7789_240x320
-        WIDTH=`python -c "print(int(${HEIGHT_VALUES[PITFT_SELECT-1]} * ${SCALE}))"`
-        HEIGHT=`python -c "print(int(${WIDTH_VALUES[PITFT_SELECT-1]} * ${SCALE}))"`
+    WIDTH=`python -c "print(int(${WIDTH_VALUES[PITFT_SELECT-1]} * ${SCALE}))"`
+    HEIGHT=`python -c "print(int(${HEIGHT_VALUES[PITFT_SELECT-1]} * ${SCALE}))"`
+    
+    if [ "${pitfttype}" == "st7789_240x320" ]; then
+       
+        # This display is natively a portrait display (width 240 x height 320)
+        # WORK IN PROGRESS (unsure if correct)
+      
+        if [ "${pitftrot}" == "90" ] || [ "${pitftrot}" == "270" ]; then
+            # swap width/height
+            reconfig /boot/config.txt "^.*hdmi_cvt.*$" "hdmi_cvt=${HEIGHT} ${WIDTH} 60 1 0 0 0"
+            # do NOT rotate HDMI on 90 or 270
+            reconfig /boot/config.txt "^.*display_hdmi_rotate.*$" ""
+        fi
+    
+        if [ "${pitftrot}" == "0" ]; then
+            # do NOT swap width/height
+            reconfig /boot/config.txt "^.*hdmi_cvt.*$" "hdmi_cvt=${WIDTH} ${HEIGHT} 60 1 0 0 0"
+            # rotate HDMI
+            reconfig /boot/config.txt "^.*display_hdmi_rotate.*$" "display_hdmi_rotate=1"
+        fi
+        if [ "${pitftrot}" == "180" ]; then
+            # do NOT swap width/height
+            reconfig /boot/config.txt "^.*hdmi_cvt.*$" "hdmi_cvt=${WIDTH} ${HEIGHT} 60 1 0 0 0"
+            # rotate HDMI
+            reconfig /boot/config.txt "^.*display_hdmi_rotate.*$" "display_hdmi_rotate=3"
+        fi
+        
+        
     else
-        WIDTH=`python -c "print(int(${WIDTH_VALUES[PITFT_SELECT-1]} * ${SCALE}))"`
-        HEIGHT=`python -c "print(int(${HEIGHT_VALUES[PITFT_SELECT-1]} * ${SCALE}))"`
+        
+        # all other displays:
+        
+        reconfig /boot/config.txt "^.*hdmi_cvt.*$" "hdmi_cvt=${WIDTH} ${HEIGHT} 60 1 0 0 0"
+        
+        if [ "${pitftrot}" == "90" ] || [ "${pitftrot}" == "270" ]; then
+            # dont rotate HDMI on 90 or 270
+            reconfig /boot/config.txt "^.*display_hdmi_rotate.*$" ""
+        fi
+    
+        if [ "${pitftrot}" == "0" ]; then
+            reconfig /boot/config.txt "^.*display_hdmi_rotate.*$" "display_hdmi_rotate=1"
+            # this is a hack but because we rotate HDMI we have to 'unrotate' the TFT!
+            pitftrot=90
+            update_configtxt || bail "Unable to update /boot/config.txt"
+            pitftrot=0
+        fi
+        if [ "${pitftrot}" == "180" ]; then
+            reconfig /boot/config.txt "^.*display_hdmi_rotate.*$" "display_hdmi_rotate=3"
+            # this is a hack but because we rotate HDMI we have to 'unrotate' the TFT!
+            pitftrot=90
+            update_configtxt || bail "Unable to update /boot/config.txt"
+            pitftrot=180
+        fi
+        
     fi
-
-    reconfig /boot/config.txt "^.*hdmi_cvt.*$" "hdmi_cvt=${WIDTH} ${HEIGHT} 60 1 0 0 0"
-
-    if [ "${pitftrot}" == "90" ] || [ "${pitftrot}" == "270" ] || [ "${pitfttype}" == "st7789_240x320" ]; then
-        # dont rotate HDMI on 90 or 270
-        reconfig /boot/config.txt "^.*display_hdmi_rotate.*$" ""
-    fi
-
-    if [ "${pitftrot}" == "0" ]; then
-        reconfig /boot/config.txt "^.*display_hdmi_rotate.*$" "display_hdmi_rotate=1"
-        # this is a hack but because we rotate HDMI we have to 'unrotate' the TFT!
-        pitftrot=90
-        update_configtxt || bail "Unable to update /boot/config.txt"
-        pitftrot=0
-    fi
-    if [ "${pitftrot}" == "180" ]; then
-        reconfig /boot/config.txt "^.*display_hdmi_rotate.*$" "display_hdmi_rotate=3"
-        # this is a hack but because we rotate HDMI we have to 'unrotate' the TFT!
-        pitftrot=90
-        update_configtxt || bail "Unable to update /boot/config.txt"
-        pitftrot=180
-    fi
-
+    
 }
 
 function install_fbcp_unit() {
@@ -476,6 +515,8 @@ function uninstall_fbcp() {
     sed -i -e '/^hdmi_group=2.*$/d' /boot/config.txt
     sed -i -e '/^hdmi_mode=87.*$/d' /boot/config.txt
     sed -i -e '/^hdmi_cvt=.*$/d' /boot/config.txt
+    # Reset HDMI rotation ########################################################################## ADDED
+    reconfig /boot/config.txt "^.*display_hdmi_rotate.*$" ""
 }
 
 function uninstall_fbcp_rclocal() {
@@ -560,9 +601,9 @@ fi
 
 PITFT_ROTATIONS=("90" "180" "270" "0")
 PITFT_TYPES=("28r" "22" "28c" "35r" "st7789_240x240" "st7789_240x135" "st7789_240x320")
-WIDTH_VALUES=(320 320 320 480 240 240 320)
-HEIGHT_VALUES=(240 240 240 320 240 135 240)
-HZ_VALUES=(64000000 64000000 64000000 32000000 64000000 64000000)
+WIDTH_VALUES=(320 320 320 480 240 240 240)
+HEIGHT_VALUES=(240 240 240 320 240 135 320)
+HZ_VALUES=(64000000 64000000 64000000 32000000 64000000 64000000 64000000)
 
 
 
@@ -629,8 +670,8 @@ then
         echo "  '35r' (3.5\" Resistive)"
         echo "  '22'  (2.2\" no touch)"
         echo "  'st7789_240x240' (1.54\" or 1.3\" no touch)"
-        echo "  'st7789_320x240' (2.0\" no touch)"
         echo "  'st7789_240x135' (1.14\" no touch)"
+        echo "  'st7789_320x240' (2.0\" no touch)"
         echo
         print_help
     fi
@@ -640,7 +681,12 @@ then
 
     info PITFT "Installing Python libraries & Software..."
     softwareinstall || bail "Unable to install software"
-
+    
+    if [ "${pitfttype}" == "st7789_240x240" ] || [ "${pitfttype}" == "st7789_240x135" ] || [ "${pitfttype}" == "st7789_240x320" ]; then
+        info PITFT "Installing st7789 display driver"
+        st7789_overlay_install || bail "Unable to install st7789 display driver"
+    fi
+    
     info PITFT "Updating /boot/config.txt..."
     update_configtxt || bail "Unable to update /boot/config.txt"
 
@@ -680,16 +726,16 @@ else
     uninstall_etc_modules
 fi
 
-#info PITFT "Updating X11 setup tweaks..."
-#update_x11profile || bail "Unable to update X11 setup"
+# info PITFT "Updating X11 setup tweaks..."
+# update_x11profile || bail "Unable to update X11 setup"
 
-#if [ "${pitfttype}" != "35r" ]; then
-#    # ask for 'on/off' button
-#    if ask "Would you like GPIO #23 to act as a on/off button?"; then
-#        info PITFT "Adding GPIO #23 on/off to PiTFT..."
-#        install_onoffbutton || bail "Unable to add on/off button"
-#    fi
-#fi
+# if [ "${pitfttype}" != "35r" ]; then
+#     # ask for 'on/off' button
+#     if ask "Would you like GPIO #23 to act as a on/off button?"; then
+#         info PITFT "Adding GPIO #23 on/off to PiTFT..."
+#         install_onoffbutton || bail "Unable to add on/off button"
+#     fi
+# fi
 
 # update_bootprefs || bail "Unable to set boot preferences"
 
